@@ -24,7 +24,7 @@
 // ============================================================================
 #define LED_PIN      6        // WS2812B data pin
 #define PWM_IN_PIN   2        // Blinkin PWM input (must support interrupts)
-#define LED_COUNT    60       // Number of WS2812B LEDs
+#define LED_COUNT    100       // Number of WS2812B LEDs
 #define LED_TYPE     WS2812B  // LED chip type
 #define COLOR_ORDER  GRB      // Typical for WS2812B
 
@@ -87,7 +87,7 @@ const CRGB solidColors[22] PROGMEM = {
     CRGB::Lime,       // 87: Lime
     CRGB::DarkGreen,  // 88: Dark Green
     CRGB::Green,      // 89: Green
-    CRGB::BlueGreen,  // 90: Blue Green (Cyan)
+    CRGB::Cyan,       // 90: Blue Green (Cyan)
     CRGB::Aqua,       // 91: Aqua
     CRGB::SkyBlue,    // 92: Sky Blue
     CRGB::DarkBlue,   // 93: Dark Blue
@@ -430,8 +430,8 @@ void endToEndBlendTwoColor(CRGB c1, CRGB c2, uint8_t speed) {
     }
     fadeToBlackBy(leds, LED_COUNT, 15);
     // Blend from c1 to c2 based on position
-    uint8_t blend = map(pos, 0, LED_COUNT - 1, 0, 255);
-    leds[pos] = blend(c1, c2, blend);
+    uint8_t blendAmt = map(pos, 0, LED_COUNT - 1, 0, 255);
+    leds[pos] = blend(c1, c2, blendAmt);
 }
 
 // --- 74: End to End Blend (uses Color1 to Color2 internally, same as 73 but named differently) ---
@@ -458,8 +458,8 @@ void twinklesTwoColor(CRGB c1, CRGB c2, uint8_t speed) {
 void colorWavesTwoColor(CRGB c1, CRGB c2, uint8_t speed) {
     uint8_t beat = beatsin8(speedToBeats(speed), 0, 255);
     for (int i = 0; i < LED_COUNT; i++) {
-        uint8_t blend = beatsin8(6, 0, 255, 0, i * 8);
-        leds[i] = blend(c1, c2, blend);
+        uint8_t blendAmt = beatsin8(6, 0, 255, 0, i * 8);
+        leds[i] = blend(c1, c2, blendAmt);
         leds[i].nscale8(beatsin8(speedToBeats(speed), 128, 255, 0, i * 4));
     }
 }
@@ -468,8 +468,8 @@ void colorWavesTwoColor(CRGB c1, CRGB c2, uint8_t speed) {
 void sinelonTwoColor(CRGB c1, CRGB c2, uint8_t density, uint8_t speed) {
     fadeToBlackBy(leds, LED_COUNT, map(speed, 0, 255, 1, 30));
     int pos = beatsin16(speedToBeats(speed), 0, LED_COUNT - 1);
-    uint8_t blend = map(pos, 0, LED_COUNT - 1, 0, 255);
-    CRGB color = blend(c1, c2, blend);
+    uint8_t blendAmt = map(pos, 0, LED_COUNT - 1, 0, 255);
+    CRGB color = blend(c1, c2, blendAmt);
     leds[pos] = color;
     int width = map(density, 0, 255, 1, 8);
     for (int i = 1; i <= width; i++) {
