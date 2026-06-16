@@ -1,0 +1,13 @@
+# Build artifacts
+build/
+*.elf
+*.bin
+*.hex
+
+# IDE files
+.idea/
+*.iml
+
+# System files
+.DS_Store
+Thumbs.db
