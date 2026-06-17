@@ -23,7 +23,7 @@
 // CONFIGURABLE DEFAULTS
 // ============================================================================
 #define LED_PIN      6        // WS2812B data pin
-#define PWM_IN_PIN   2        // Blinkin PWM input (must support interrupts)
+#define PWM_IN_PIN   8        // Blinkin PWM input on ICP1 (Timer1 input capture)
 #define LED_COUNT    100       // Number of WS2812B LEDs
 #define LED_TYPE     WS2812B  // LED chip type
 #define COLOR_ORDER  GRB      // Typical for WS2812B
@@ -43,9 +43,9 @@ CRGB defaultColor2 = CRGB::Blue;
 // ============================================================================
 CRGB leds[LED_COUNT];
 
-// --- PWM reading (interrupt-based, non-blocking) ---
-volatile uint32_t pwmRiseTime = 0;
-volatile uint32_t pwmPulseWidth = 0;
+// --- PWM reading via Timer1 hardware input capture (ICP1, Pin 8) ---
+volatile uint16_t pwmRiseTime   = 0;
+volatile uint32_t pwmPulseWidth = 0;       // pulse width in microseconds
 volatile bool     pwmNewData    = false;
 
 // --- Current pattern ---
@@ -60,16 +60,16 @@ uint8_t globalBrightness = 255;
 // PULSE WIDTH LOOKUP TABLE (100 patterns, stored in PROGMEM)
 // ============================================================================
 const uint16_t patternPulseWidths[100] PROGMEM = {
-    1105, 1115, 1125, 1135, 1145, 1155, 1165, 1175, 1185, 1195,  //  0-9
-    1205, 1215, 1225, 1235, 1245, 1255, 1265, 1275, 1285, 1295,  // 10-19
-    1305, 1315, 1325, 1335, 1345, 1355, 1365, 1375, 1385, 1395,  // 20-29
-    1405, 1415, 1425, 1435, 1445, 1455, 1465, 1475, 1485, 1495,  // 30-39
-    1505, 1515, 1525, 1535, 1545, 1555, 1565, 1575, 1585, 1595,  // 40-49
-    1605, 1615, 1625, 1635, 1645, 1655, 1665, 1675, 1685, 1695,  // 50-59
-    1705, 1715, 1725, 1735, 1745, 1755, 1765, 1775, 1785, 1795,  // 60-69
-    1805, 1815, 1825, 1835, 1845, 1855, 1865, 1875, 1885, 1895,  // 70-79
-    1905, 1915, 1925, 1935, 1945, 1955, 1965, 1975, 1985, 1995,  // 80-89
-    2005, 2015, 2025, 2035, 2045, 2055, 2065, 2075, 2085, 2095   // 90-99
+    1005, 1015, 1025, 1035, 1045, 1055, 1065, 1075, 1085, 1095,  //  0-9
+    1105, 1115, 1125, 1135, 1145, 1155, 1165, 1175, 1185, 1195,  // 10-19
+    1205, 1215, 1225, 1235, 1245, 1255, 1265, 1275, 1285, 1295,  // 20-29
+    1305, 1315, 1325, 1335, 1345, 1355, 1365, 1375, 1385, 1395,  // 30-39
+    1405, 1415, 1425, 1435, 1445, 1455, 1465, 1475, 1485, 1495,  // 40-49
+    1505, 1515, 1525, 1535, 1545, 1555, 1565, 1575, 1585, 1595,  // 50-59
+    1605, 1615, 1625, 1635, 1645, 1655, 1665, 1675, 1685, 1695,  // 60-69
+    1705, 1715, 1725, 1735, 1745, 1755, 1765, 1775, 1785, 1795,  // 70-79
+    1805, 1815, 1825, 1835, 1845, 1855, 1865, 1875, 1885, 1895,  // 80-89
+    1905, 1915, 1925, 1935, 1945, 1955, 1965, 1975, 1985, 1995   // 90-99
 };
 
 // ============================================================================
@@ -102,22 +102,28 @@ const CRGB solidColors[22] PROGMEM = {
 
 // ============================================================================
 // INTERRUPT SERVICE ROUTINE for PWM measurement
+// Timer1 Input Capture (ICP1, Pin 8) – hardware precision, 0.0625 µs resolution
 // ============================================================================
-void pwmISR() {
-    uint8_t state = digitalRead(PWM_IN_PIN);
-    uint32_t now = micros();
+ISR(TIMER1_CAPT_vect) {
+    static uint16_t riseTime = 0;
+    uint16_t now = ICR1;                         // capture current timer value
 
-    if (state == HIGH) {
-        pwmRiseTime = now;
+    if (TCCR1B & (1 << ICES1)) {
+        // --- Rising edge (start of pulse) ---
+        riseTime = now;
+        TCCR1B &= ~(1 << ICES1);                 // switch to falling edge next
     } else {
-        if (pwmRiseTime > 0) {
-            uint32_t width = now - pwmRiseTime;
-            // Valid Blinkin range: ~1100-2100 us
-            if (width >= 1000 && width <= 2200) {
-                pwmPulseWidth = width;
-                pwmNewData = true;
-            }
+        // --- Falling edge (end of pulse) ---
+        uint16_t ticks = now - riseTime;
+        // 16 MHz timer with prescaler 1 → 1 tick = 1/16 µs (0.0625 µs)
+        uint32_t widthUs = (ticks + 8) / 16 +6;    // direct division, no overflow; +8 rounds to nearest µs; +6 for Connection cost(tested)
+
+        // Valid Blinkin range: ~1100-2100 µs
+        if (widthUs >= 1000 && widthUs <= 2200) {
+            pwmPulseWidth = widthUs;
+            pwmNewData    = true;
         }
+        TCCR1B |= (1 << ICES1);                  // switch back to rising edge
     }
 }
 
@@ -654,6 +660,24 @@ void runPattern(int pattern, CRGB c1, CRGB c2,
 }
 
 // ============================================================================
+// TIMER1 INPUT CAPTURE INITIALIZATION
+// ============================================================================
+void setupTimer1Capture() {
+    // Pin 8 = ICP1 (Input Capture Pin 1) for Timer1 on ATmega328P (Uno, Nano)
+    // For other MCUs (e.g., ATmega32U4 / Leonardo), ICP1 is on a different pin.
+    // Check your board's pinout and adjust PWM_IN_PIN accordingly.
+    pinMode(PWM_IN_PIN, INPUT_PULLUP);
+
+    TCCR1A = 0;                         // Normal port operation, no PWM
+    TCCR1B = (1 << CS10)                // Prescaler = 1 → tick = 0.0625 µs @ 16 MHz
+           | (1 << ICES1)               // Initial edge: rising
+           | (1 << ICNC1);              // Input Capture Noise Canceller (hardware debounce)
+    TCCR1C = 0;
+    TCNT1  = 0;                         // Reset timer counter
+    TIMSK1 = (1 << ICIE1);              // Enable input capture interrupt
+}
+
+// ============================================================================
 // SETUP
 // ============================================================================
 void setup() {
@@ -668,9 +692,8 @@ void setup() {
     FastLED.clear();
     FastLED.show();
 
-    // Setup PWM input pin with interrupt
-    pinMode(PWM_IN_PIN, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(PWM_IN_PIN), pwmISR, CHANGE);
+    // Setup Timer1 hardware input capture on ICP1 (Pin 8)
+    setupTimer1Capture();
 
     Serial.println(F("Ready. Waiting for Blinkin signal..."));
 }
@@ -701,6 +724,10 @@ void loop() {
             Serial.print(newPattern);
             Serial.println(F(")"));
         }
+    }else{
+        Serial.print(F("PWM: "));
+        Serial.print(pwmPulseWidth);
+        Serial.println(F(" us"));
     }
 
     // --- Run current animation ---
