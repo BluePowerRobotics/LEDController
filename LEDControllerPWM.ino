@@ -640,7 +640,8 @@ void runPattern(int pattern, CRGB c1, CRGB c2,
         // SOLID COLORS (78-99)
         // ================================================================
         case 78 ... 99:
-            CRGB color = pgm_read_dword(&solidColors[pattern - 78]);
+            CRGB color;
+            ::memcpy_P(&color, &solidColors[pattern - 78], 3);
             fill_solid(leds, LED_COUNT, color);
             break;
 
