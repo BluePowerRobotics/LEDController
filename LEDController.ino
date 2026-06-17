@@ -27,7 +27,7 @@
 #define I2C_ADDRESS  0x08     // Arduino I2C slave address
 #define LED_COUNT    100       // Number of WS2812B LEDs
 #define LED_TYPE     WS2812B  // LED chip type
-#define COLOR_ORDER  GRB      // Typical for WS2812B
+#define COLOR_ORDER  GBR      // Typical for WS2812B
 
 // Default pattern parameters (used as substitutes for animation knobs)
 #define DEFAULT_DENSITY   128   // Pattern Density (0-255)
@@ -36,8 +36,8 @@
 #define DEFAULT_DIMMING   128   // Dimming amount (0-255)
 
 // Default Color1 & Color2 (used by patterns 49-78)
-CRGB color1 = CRGB::Red;
-CRGB color2 = CRGB::Blue;
+CRGB defaultColor1 = CRGB::Red;
+CRGB defaultColor2 = CRGB::Blue;
 
 // ============================================================================
 // GLOBALS
@@ -599,7 +599,10 @@ void runPattern(int pattern, CRGB c1, CRGB c2,
         // SOLID COLORS (78-99)
         // ================================================================
         case 78 ... 99:
-            fill_solid(leds, LED_COUNT, solidColors[pattern - 78]);
+            {
+                CRGB color = pgm_read_dword(&solidColors[pattern - 78]);
+                fill_solid(leds, LED_COUNT, color);
+            }
             break;
 
         default:
@@ -661,7 +664,7 @@ void loop() {
                 break;
 
             case 0x02:  // Set Color1 (R,G,B)
-                color1 = CRGB(p1, p2, p3);
+                defaultColor1 = CRGB(p1, p2, p3);
                 patternChanged = true;
                 Serial.print(F("Color1 set to "));
                 Serial.print(p1); Serial.print(F(","));
@@ -670,7 +673,7 @@ void loop() {
                 break;
 
             case 0x03:  // Set Color2 (R,G,B)
-                color2 = CRGB(p1, p2, p3);
+                defaultColor2 = CRGB(p1, p2, p3);
                 patternChanged = true;
                 Serial.print(F("Color2 set to "));
                 Serial.print(p1); Serial.print(F(","));
@@ -698,7 +701,7 @@ void loop() {
     uint8_t width   = DEFAULT_WIDTH;
     uint8_t dimming = DEFAULT_DIMMING;
 
-    runPattern(currentPattern, color1, color2,
+    runPattern(currentPattern, defaultColor1, defaultColor2,
                density, speed, width, dimming);
 
     // --- Apply global brightness and show ---
