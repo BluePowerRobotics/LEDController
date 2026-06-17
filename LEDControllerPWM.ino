@@ -18,35 +18,35 @@
  */
 
 #include <FastLED.h>
-#include <Wire.h>
 
 // ============================================================================
 // CONFIGURABLE DEFAULTS
 // ============================================================================
 #define LED_PIN      6        // WS2812B data pin
-#define I2C_ADDRESS  0x08     // Arduino I2C slave address
+#define PWM_IN_PIN   8        // Blinkin PWM input on ICP1 (Timer1 input capture)
 #define LED_COUNT    100       // Number of WS2812B LEDs
 #define LED_TYPE     WS2812B  // LED chip type
-#define COLOR_ORDER  GRB      // Typical for WS2812B
+#define COLOR_ORDER  GBR      // Typical for WS2812B
 
-// Default pattern parameters (used as substitutes for animation knobs)
+// Default pattern parameters (used as substitutes for Blinkin's adjustable knobs)
 #define DEFAULT_DENSITY   128   // Pattern Density (0-255)
 #define DEFAULT_SPEED     128   // Animation Speed (0-255, higher = faster)
 #define DEFAULT_WIDTH     50    // Pattern Width (1-255)
 #define DEFAULT_DIMMING   128   // Dimming amount (0-255)
 
 // Default Color1 & Color2 (used by patterns 49-78)
-CRGB color1 = CRGB::Red;
-CRGB color2 = CRGB::Blue;
+CRGB defaultColor1 = CRGB::Red;
+CRGB defaultColor2 = CRGB::Blue;
 
 // ============================================================================
 // GLOBALS
 // ============================================================================
 CRGB leds[LED_COUNT];
 
-// --- I2C receive buffer ---
-volatile uint8_t i2cCmd[4] = {0};
-volatile bool    i2cDataReady = false;
+// --- PWM reading via Timer1 hardware input capture (ICP1, Pin 8) ---
+volatile uint16_t pwmRiseTime   = 0;
+volatile uint32_t pwmPulseWidth = 0;       // pulse width in microseconds
+volatile bool     pwmNewData    = false;
 
 // --- Current pattern ---
 int  currentPattern   = 0;     // 0-99
@@ -57,46 +57,87 @@ bool patternChanged   = true;  // true on change to reset animation state
 uint8_t globalBrightness = 255;
 
 // ============================================================================
-// SOLID COLOR LOOKUP (patterns 78-99, 22 colors, indexed 0..21)
+// PULSE WIDTH LOOKUP TABLE (100 patterns, stored in PROGMEM)
 // ============================================================================
-const CRGB solidColors[22] PROGMEM = {
-    CRGB::HotPink,    // 78: Hot Pink
-    CRGB::DarkRed,    // 79: Dark Red
-    CRGB::Red,        // 80: Red
-    CRGB::OrangeRed,  // 81: Red Orange
-    CRGB::Orange,     // 82: Orange
-    CRGB::Gold,       // 83: Gold
-    CRGB::Yellow,     // 84: Yellow
-    CRGB::LawnGreen,  // 85: Lawn Green
-    CRGB::Lime,       // 86: Lime
-    CRGB::DarkGreen,  // 87: Dark Green
-    CRGB::Green,      // 88: Green
-    CRGB::Cyan,       // 89: Blue Green (Cyan)
-    CRGB::Aqua,       // 90: Aqua
-    CRGB::SkyBlue,    // 91: Sky Blue
-    CRGB::DarkBlue,   // 92: Dark Blue
-    CRGB::Blue,       // 93: Blue
-    CRGB::BlueViolet, // 94: Blue Violet
-    CRGB::Violet,     // 95: Violet
-    CRGB::White,      // 96: White
-    CRGB::Gray,       // 97: Gray
-    CRGB::DarkGray,   // 98: Dark Gray
-    CRGB::Black       // 99: Black
+const uint16_t patternPulseWidths[100] PROGMEM = {
+    1005, 1015, 1025, 1035, 1045, 1055, 1065, 1075, 1085, 1095,  //  0-9
+    1105, 1115, 1125, 1135, 1145, 1155, 1165, 1175, 1185, 1195,  // 10-19
+    1205, 1215, 1225, 1235, 1245, 1255, 1265, 1275, 1285, 1295,  // 20-29
+    1305, 1315, 1325, 1335, 1345, 1355, 1365, 1375, 1385, 1395,  // 30-39
+    1405, 1415, 1425, 1435, 1445, 1455, 1465, 1475, 1485, 1495,  // 40-49
+    1505, 1515, 1525, 1535, 1545, 1555, 1565, 1575, 1585, 1595,  // 50-59
+    1605, 1615, 1625, 1635, 1645, 1655, 1665, 1675, 1685, 1695,  // 60-69
+    1705, 1715, 1725, 1735, 1745, 1755, 1765, 1775, 1785, 1795,  // 70-79
+    1805, 1815, 1825, 1835, 1845, 1855, 1865, 1875, 1885, 1895,  // 80-89
+    1905, 1915, 1925, 1935, 1945, 1955, 1965, 1975, 1985, 1995   // 90-99
 };
 
 // ============================================================================
-// I2C RECEIVE HANDLER (slave at I2C_ADDRESS)
+// SOLID COLOR LOOKUP (patterns 79-99, 22 colors)
 // ============================================================================
-void receiveEvent(int howMany) {
-    if (howMany >= 4) {
-        for (int i = 0; i < 4; i++) {
-            i2cCmd[i] = Wire.read();
+const CRGB solidColors[22] PROGMEM = {
+    CRGB::HotPink,    // 79: Hot Pink
+    CRGB::DarkRed,    // 80: Dark Red
+    CRGB::Red,        // 81: Red
+    CRGB::OrangeRed,  // 82: Red Orange
+    CRGB::Orange,     // 83: Orange
+    CRGB::Gold,       // 84: Gold
+    CRGB::Yellow,     // 85: Yellow
+    CRGB::LawnGreen,  // 86: Lawn Green
+    CRGB::Lime,       // 87: Lime
+    CRGB::DarkGreen,  // 88: Dark Green
+    CRGB::Green,      // 89: Green
+    CRGB::Cyan,       // 90: Blue Green (Cyan)
+    CRGB::Aqua,       // 91: Aqua
+    CRGB::SkyBlue,    // 92: Sky Blue
+    CRGB::DarkBlue,   // 93: Dark Blue
+    CRGB::Blue,       // 94: Blue
+    CRGB::BlueViolet, // 95: Blue Violet
+    CRGB::Violet,     // 96: Violet
+    CRGB::White,      // 97: White
+    CRGB::Gray,       // 98: Gray
+    CRGB::DarkGray,   // 99: Dark Gray
+    CRGB::Black       // 100: Black
+};
+
+// ============================================================================
+// INTERRUPT SERVICE ROUTINE for PWM measurement
+// Timer1 Input Capture (ICP1, Pin 8) – hardware precision, 0.0625 µs resolution
+// ============================================================================
+ISR(TIMER1_CAPT_vect) {
+    static uint16_t riseTime = 0;
+    uint16_t now = ICR1;
+
+    if (TCCR1B & (1 << ICES1)) {          // 上升沿
+        riseTime = now;
+        TCCR1B &= ~(1 << ICES1);          // 改为等待下降沿
+    } else {                               // 下降沿
+        uint16_t ticks = now - riseTime;
+        uint32_t widthUs = (ticks + 8) / 16 + 6;  // 四舍五入到 µs
+        // 只接受 1000 µs ~ 2200 µs 且高电平时间 ≥ 800 µs
+        if (widthUs >= 1000 && widthUs <= 2000 && (ticks >= 12800)) { // 12800 ticks = 800 µs
+            pwmPulseWidth = widthUs;
+            pwmNewData    = true;
         }
-        i2cDataReady = true;
-    } else {
-        // Discard incomplete frame
-        while (Wire.available()) Wire.read();
+        TCCR1B |= (1 << ICES1);           // 恢复为等待上升沿
     }
+}
+
+// ============================================================================
+// PATTERN MATCHING: find first standard pulse width >= measured value (ceil)
+// ============================================================================
+int getPatternIndex(uint16_t pulseWidth) {
+    for (int i = 0; i < 100; i++) {
+        uint16_t ref = pgm_read_word(&patternPulseWidths[i]);
+        if (ref >= pulseWidth) {
+            uint16_t diff = ref - pulseWidth;
+            // Reject if more than 15 us away (no clear match)
+            if (diff > 15) return -1;
+            return i;  // 0-based index
+        }
+    }
+    // Measured pulse width is larger than the largest reference
+    return -1;
 }
 
 // ============================================================================
@@ -599,7 +640,8 @@ void runPattern(int pattern, CRGB c1, CRGB c2,
         // SOLID COLORS (78-99)
         // ================================================================
         case 78 ... 99:
-            fill_solid(leds, LED_COUNT, solidColors[pattern - 78]);
+            CRGB color = pgm_read_dword(&solidColors[pattern - 78]);
+            fill_solid(leds, LED_COUNT, color);
             break;
 
         default:
@@ -607,6 +649,24 @@ void runPattern(int pattern, CRGB c1, CRGB c2,
             rainbowWithPalette(RainbowColors_p, density, speed);
             break;
     }
+}
+
+// ============================================================================
+// TIMER1 INPUT CAPTURE INITIALIZATION
+// ============================================================================
+void setupTimer1Capture() {
+    // Pin 8 = ICP1 (Input Capture Pin 1) for Timer1 on ATmega328P (Uno, Nano)
+    // For other MCUs (e.g., ATmega32U4 / Leonardo), ICP1 is on a different pin.
+    // Check your board's pinout and adjust PWM_IN_PIN accordingly.
+    pinMode(PWM_IN_PIN, INPUT_PULLUP);
+
+    TCCR1A = 0;                         // Normal port operation, no PWM
+    TCCR1B = (1 << CS10)                // Prescaler = 1 → tick = 0.0625 µs @ 16 MHz
+           | (1 << ICES1)               // Initial edge: rising
+           | (1 << ICNC1);              // Input Capture Noise Canceller (hardware debounce)
+    TCCR1C = 0;
+    TCNT1  = 0;                         // Reset timer counter
+    TIMSK1 = (1 << ICIE1);              // Enable input capture interrupt
 }
 
 // ============================================================================
@@ -624,72 +684,68 @@ void setup() {
     FastLED.clear();
     FastLED.show();
 
-    // Initialize I2C slave
-    Wire.begin(I2C_ADDRESS);
-    Wire.onReceive(receiveEvent);
+    // Setup Timer1 hardware input capture on ICP1 (Pin 8)
+    setupTimer1Capture();
 
-    Serial.print(F("I2C address: 0x"));
-    Serial.println(I2C_ADDRESS, HEX);
-    Serial.println(F("Ready. Waiting for I2C commands..."));
+    Serial.println(F("Ready. Waiting for Blinkin signal..."));
 }
+
+#define VOTE_SIZE 7
+static int voteBuffer[VOTE_SIZE] = {-1, -1, -1, -1, -1, -1, -1};
+static uint8_t voteIndex = 0;
+static uint32_t lastSwitchTime = 0;
+const uint32_t MIN_SWITCH_INTERVAL = 200;  // ms
 
 // ============================================================================
 // LOOP
 // ============================================================================
 void loop() {
-    // --- Process I2C commands ---
-    if (i2cDataReady) {
+    // --- Process new PWM data ---
+    if (pwmNewData) {
         noInterrupts();
-        uint8_t cmd = i2cCmd[0];
-        uint8_t p1  = i2cCmd[1];
-        uint8_t p2  = i2cCmd[2];
-        uint8_t p3  = i2cCmd[3];
-        i2cDataReady = false;
+        uint32_t capturedWidth = pwmPulseWidth;
+        pwmNewData = false;
         interrupts();
 
-        switch (cmd) {
-            case 0x01:  // Set Pattern (0–99)
-                if (p1 <= 99) {
-                    if (currentPattern != p1) {
-                        previousPattern = currentPattern;
-                        currentPattern = p1;
-                        patternChanged = true;
-                        Serial.print(F("Pattern set to "));
-                        Serial.println(p1);
-                    }
+        int newPattern = getPatternIndex((uint16_t)capturedWidth);
+        if (newPattern >= 0) {
+            voteBuffer[voteIndex] = newPattern;
+            voteIndex = (voteIndex + 1) % VOTE_SIZE;
+
+            // 统计每个候选的出现次数
+            int count[100] = {0};
+            for (int i = 0; i < VOTE_SIZE; i++) {
+                if (voteBuffer[i] >= 0) count[voteBuffer[i]]++;
+            }
+            int bestPatt = -1, maxCnt = 0;
+            for (int i = 0; i < 100; i++) {
+                if (count[i] > maxCnt) {
+                    maxCnt = count[i];
+                    bestPatt = i;
                 }
-                break;
+            }
+            // 多数且冷却时间已过才切换
+            if (bestPatt >= 0 && maxCnt >= 5 && bestPatt != currentPattern) {
+                if (millis() - lastSwitchTime > MIN_SWITCH_INTERVAL) {
+                    previousPattern = currentPattern;
+                    currentPattern = bestPatt;
+                    patternChanged = true;
+                    lastSwitchTime = millis();
 
-            case 0x02:  // Set Color1 (R,G,B)
-                color1 = CRGB(p1, p2, p3);
-                patternChanged = true;
-                Serial.print(F("Color1 set to "));
-                Serial.print(p1); Serial.print(F(","));
-                Serial.print(p2); Serial.print(F(","));
-                Serial.println(p3);
-                break;
-
-            case 0x03:  // Set Color2 (R,G,B)
-                color2 = CRGB(p1, p2, p3);
-                patternChanged = true;
-                Serial.print(F("Color2 set to "));
-                Serial.print(p1); Serial.print(F(","));
-                Serial.print(p2); Serial.print(F(","));
-                Serial.println(p3);
-                break;
-
-            case 0x04:  // Set Brightness (0–255)
-                globalBrightness = p1;
-                FastLED.setBrightness(globalBrightness);
-                Serial.print(F("Brightness set to "));
-                Serial.println(globalBrightness);
-                break;
-
-            default:
-                Serial.print(F("Unknown command: 0x"));
-                Serial.println(cmd, HEX);
-                break;
+                    Serial.print(F("PWM: "));
+                    Serial.print(capturedWidth);
+                    Serial.print(F(" us -> Pattern "));
+                    Serial.print(bestPatt + 1);
+                    Serial.print(F(" (index "));
+                    Serial.print(bestPatt);
+                    Serial.println(F(")"));
+                }
+            }
         }
+    }else{
+        // Serial.print("PWM: ");
+        // Serial.print(pwmPulseWidth);
+        // Serial.println(" us");
     }
 
     // --- Run current animation ---
@@ -698,7 +754,7 @@ void loop() {
     uint8_t width   = DEFAULT_WIDTH;
     uint8_t dimming = DEFAULT_DIMMING;
 
-    runPattern(currentPattern, color1, color2,
+    runPattern(currentPattern, defaultColor1, defaultColor2,
                density, speed, width, dimming);
 
     // --- Apply global brightness and show ---
