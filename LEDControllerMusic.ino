@@ -24,6 +24,15 @@
 #define COLOR_ORDER   GBR
 
 // ============================================================================
+// BREATH 模式参数
+// ============================================================================
+#define BREATH_COLOR         CRGB(0, 180, 255)  // 预设颜色 (冰蓝)
+#define BREATH_DECAY_SEC     0.8f               // 衰减时长 (秒)
+#define BREATH_MAINTENANCE   40                 // 维持亮度 (0-255)
+#define BREATH_FULL          255                // 触发瞬间亮度
+#define BREATH_MAX_TRIGGERS  64                 // 最大同时活跃触发数
+
+// ============================================================================
 // FLOW 模式参数
 // ============================================================================
 #define FLOW_SPEED      50.0f   // 脉冲流动速度 (LEDs/秒)
@@ -83,6 +92,18 @@ float pgmReadFloat(const float* ptr) {
 }
 
 // ============================================================================
+// BREATH 触发状态
+// ============================================================================
+struct BreathTrigger {
+    float triggerSec;  // 触发时刻 (相对于 startTime, 秒)
+    bool  active;
+};
+
+BreathTrigger breathTriggers[BREATH_MAX_TRIGGERS];
+int            breathTriggerCount = 0;
+int            breathNextNote     = 0;  // 下一个待触发的音符索引
+
+// ============================================================================
 // FLOW 脉冲状态
 // ============================================================================
 struct FlowPulse {
@@ -99,37 +120,73 @@ int       nextNote   = 0;  // 下一个待触发的音符索引
 // 音乐效果函数
 // ============================================================================
 
+// --- BREATH 初始化 (enable=0 时调用) ---
+void breathInit() {
+    breathTriggerCount = 0;
+    breathNextNote     = 0;
+    for (int i = 0; i < BREATH_MAX_TRIGGERS; i++) {
+        breathTriggers[i].active = false;
+    }
+}
+
 // --- BREATH 呼吸效果 ---
-// 仅使用 musicBreathTime[] (时间点)
-// 整体灯带呼吸，颜色随当前时间推进
+// 整条灯带统一颜色，每次触发后亮度从 FULL 指数衰减至 MAINTENANCE
+// 多次触发可叠加，取所有活跃包络的最大亮度
 void musicBreath() {
     uint32_t elapsed = millis() - startTime;
     float elapsedSec = elapsed / 1000.0f;
 
-    // 推进索引: 找到当前时间对应的音符
-    while (musicIndex < MUSIC_NOTE_COUNT - 1) {
-        float nextTime = pgmReadFloat(&musicBreathTime[musicIndex + 1]);
-        if (elapsedSec >= nextTime) {
-            musicIndex++;
+    // 1. 注册新触发
+    while (breathNextNote < MUSIC_NOTE_COUNT &&
+           breathTriggerCount < BREATH_MAX_TRIGGERS) {
+        float t = pgmReadFloat(&musicBreathTime[breathNextNote]);
+        if (elapsedSec >= t) {
+            // 复用或新增触发槽
+            int slot = -1;
+            for (int i = 0; i < BREATH_MAX_TRIGGERS; i++) {
+                if (!breathTriggers[i].active) {
+                    slot = i;
+                    break;
+                }
+            }
+            if (slot == -1) slot = breathTriggerCount;  // 所有槽满则追加
+
+            breathTriggers[slot].triggerSec = t;
+            breathTriggers[slot].active     = true;
+            if (slot == breathTriggerCount) breathTriggerCount++;
+            breathNextNote++;
         } else {
             break;
         }
     }
 
-    // 如果已经播完最后一音，停在最后
-    if (musicIndex >= MUSIC_NOTE_COUNT) {
-        musicIndex = MUSIC_NOTE_COUNT - 1;
+    // 2. 计算每个触发的当前亮度，取最大值
+    uint8_t maxBrightness = BREATH_MAINTENANCE;  // 维持亮度保底
+
+    for (int i = 0; i < breathTriggerCount; i++) {
+        if (!breathTriggers[i].active) continue;
+
+        float dt = elapsedSec - breathTriggers[i].triggerSec;
+        if (dt < 0.0f) dt = 0.0f;
+
+        // 衰减超过 3 倍衰减时长则标记失活
+        if (dt > BREATH_DECAY_SEC * 3.0f) {
+            breathTriggers[i].active = false;
+            continue;
+        }
+
+        // 指数衰减: FULL → MAINTENANCE
+        float ratio = exp(-dt / BREATH_DECAY_SEC);
+        uint8_t bri = BREATH_MAINTENANCE +
+                      (uint8_t)((BREATH_FULL - BREATH_MAINTENANCE) * ratio);
+
+        if (bri > maxBrightness) maxBrightness = bri;
     }
 
-    // 呼吸亮度: 用正弦波
-    float phase = elapsedSec * 1.5f;  // 呼吸频率
-    uint8_t brightness = (uint8_t)(127.5f * (1.0f + sin(phase))) + 10;
-
-    // 根据当前音符索引映射颜色 (简单色相轮)
-    uint8_t hue = (musicIndex * 17) % 255;
-    CRGB color = CHSV(hue, 200, 255);
+    // 3. 整条灯带统一着色 + 亮度
+    CRGB color = BREATH_COLOR;
     fill_solid(leds, LED_COUNT, color);
-    nscale8(leds, LED_COUNT, brightness);
+    nscale8(leds, LED_COUNT, maxBrightness);
 }
 
 // --- FLOW 初始化 (enable=0 时调用) ---
@@ -237,6 +294,8 @@ void processMusicCommand(uint8_t mode, uint8_t enable) {
     musicIndex   = 0;
     if (musicMode == MUSIC_FLOW) {
         flowInit();
+    } else if (musicMode == MUSIC_BREATH) {
+        breathInit();
     }
     Serial.print(F("Music enabled, startTime = "));
     Serial.println(startTime);
