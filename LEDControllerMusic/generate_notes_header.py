@@ -14,6 +14,13 @@
 import csv
 import sys
 
+def float_str(s):
+    """确保可以安全作为 C++ float literal。无小数点时补 '.0'，避免 '220f'。"""
+    s = s.strip()
+    if '.' not in s:
+        s = s + '.0'
+    return s + 'f'
+
 def generate_header(csv_path="Notes.csv", header_path="notes_data.h"):
     rows = []
     with open(csv_path, "r") as f:
@@ -37,7 +44,7 @@ def generate_header(csv_path="Notes.csv", header_path="notes_data.h"):
                            ("musicFlowFreq", freq_vals)]:
             f.write("const PROGMEM float {}[MUSIC_NOTE_COUNT] = {{\n".format(name))
             for i in range(0, len(vals), 8):
-                chunk = [vals[j] + "f" for j in range(i, min(i + 8, len(vals)))]
+                chunk = [float_str(vals[j]) for j in range(i, min(i + 8, len(vals)))]
                 line = "    " + ", ".join(chunk)
                 if i + 8 < len(vals):
                     line += ","
@@ -48,7 +55,7 @@ def generate_header(csv_path="Notes.csv", header_path="notes_data.h"):
         f.write("// --- BREATH 模式: 仅时间点 ---\n")
         f.write("const PROGMEM float musicBreathTime[MUSIC_NOTE_COUNT] = {\n")
         for i in range(0, len(time_vals), 8):
-            chunk = [time_vals[j] + "f" for j in range(i, min(i + 8, len(time_vals)))]
+            chunk = [float_str(time_vals[j]) for j in range(i, min(i + 8, len(time_vals)))]
             line = "    " + ", ".join(chunk)
             if i + 8 < len(time_vals):
                 line += ","
