@@ -62,7 +62,6 @@ enum MusicMode {
 MusicMode  musicMode     = MUSIC_BREATH;
 bool       musicEnabled  = false;
 uint32_t   startTime     = 0;      // 启用时刻 (millis)
-int        musicIndex    = 0;      // 当前音符索引 (0..MUSIC_NOTE_COUNT-1)
 
 // --- 全局亮度 ---
 uint8_t globalBrightness = DEFAULT_BRIGHTNESS;
@@ -100,8 +99,7 @@ struct BreathTrigger {
 };
 
 BreathTrigger breathTriggers[BREATH_MAX_TRIGGERS];
-int            breathTriggerCount = 0;
-int            breathNextNote     = 0;  // 下一个待触发的音符索引
+int            breathNextNote = 0;   // 下一个待触发的音符索引
 
 // ============================================================================
 // FLOW 脉冲状态
@@ -113,8 +111,7 @@ struct FlowPulse {
 };
 
 FlowPulse pulses[FLOW_MAX_PULSES];
-int       pulseCount = 0;  // 已触发的脉冲数
-int       nextNote   = 0;  // 下一个待触发的音符索引
+int       nextNote = 0;  // 下一个待触发的音符索引
 
 // ============================================================================
 // 音乐效果函数
@@ -122,26 +119,22 @@ int       nextNote   = 0;  // 下一个待触发的音符索引
 
 // --- BREATH 初始化 (enable=0 时调用) ---
 void breathInit() {
-    breathTriggerCount = 0;
-    breathNextNote     = 0;
+    breathNextNote = 0;
     for (int i = 0; i < BREATH_MAX_TRIGGERS; i++) {
         breathTriggers[i].active = false;
     }
 }
 
-// --- BREATH 呼吸效果 ---
-// 整条灯带统一颜色，每次触发后亮度从 FULL 指数衰减至 MAINTENANCE
-// 多次触发可叠加，取所有活跃包络的最大亮度
+// --- BREATH 呼吸效果（三次多项式衰减，在设定时间精确到达维持亮度）---
 void musicBreath() {
     uint32_t elapsed = millis() - startTime;
     float elapsedSec = elapsed / 1000.0f;
 
     // 1. 注册新触发
-    while (breathNextNote < MUSIC_NOTE_COUNT &&
-           breathTriggerCount < BREATH_MAX_TRIGGERS) {
+    while (breathNextNote < MUSIC_NOTE_COUNT) {
         float t = pgmReadFloat(&musicBreathTime[breathNextNote]);
         if (elapsedSec >= t) {
-            // 复用或新增触发槽
+            // 寻找空闲触发槽
             int slot = -1;
             for (int i = 0; i < BREATH_MAX_TRIGGERS; i++) {
                 if (!breathTriggers[i].active) {
@@ -149,11 +142,11 @@ void musicBreath() {
                     break;
                 }
             }
-            if (slot == -1) slot = breathTriggerCount;  // 所有槽满则追加
+            // 所有槽满，等待下一帧有槽位释放
+            if (slot == -1) break;
 
             breathTriggers[slot].triggerSec = t;
             breathTriggers[slot].active     = true;
-            if (slot == breathTriggerCount) breathTriggerCount++;
             breathNextNote++;
         } else {
             break;
@@ -163,22 +156,32 @@ void musicBreath() {
     // 2. 计算每个触发的当前亮度，取最大值
     uint8_t maxBrightness = BREATH_MAINTENANCE;  // 维持亮度保底
 
-    for (int i = 0; i < breathTriggerCount; i++) {
+    // 多项式系数（每次循环可重新计算，开销极小）
+    float T    = BREATH_DECAY_SEC;
+    float Lmax = (float)BREATH_FULL;
+    float Lmin = (float)BREATH_MAINTENANCE;
+    float a    = (Lmax - 2.0f * Lmin) / (T * T * T);
+    float b    = (3.0f * Lmin - Lmax) / (T * T);
+    float c    = -Lmax / T;
+
+    for (int i = 0; i < BREATH_MAX_TRIGGERS; i++) {
         if (!breathTriggers[i].active) continue;
 
         float dt = elapsedSec - breathTriggers[i].triggerSec;
-        if (dt < 0.0f) dt = 0.0f;
 
-        // 衰减超过 3 倍衰减时长则标记失活
-        if (dt > BREATH_DECAY_SEC * 3.0f) {
+        uint8_t bri;
+        if (dt >= T) {
+            // 达到设定时间，归位并失活
+            bri = (uint8_t)Lmin;
             breathTriggers[i].active = false;
-            continue;
+        } else {
+            // 三次多项式: L(t) = a*t^3 + b*t^2 + c*t + Lmax
+            float val = a * dt * dt * dt + b * dt * dt + c * dt + Lmax;
+            // 浮点误差保护
+            if (val > Lmax) val = Lmax;
+            if (val < Lmin) val = Lmin;
+            bri = (uint8_t)val;
         }
-
-        // 指数衰减: FULL → MAINTENANCE
-        float ratio = exp(-dt / BREATH_DECAY_SEC);
-        uint8_t bri = BREATH_MAINTENANCE +
-                      (uint8_t)((BREATH_FULL - BREATH_MAINTENANCE) * ratio);
 
         if (bri > maxBrightness) maxBrightness = bri;
     }
@@ -191,35 +194,41 @@ void musicBreath() {
 
 // --- FLOW 初始化 (enable=0 时调用) ---
 void flowInit() {
-    pulseCount = 0;
-    nextNote   = 0;
+    nextNote = 0;
     for (int i = 0; i < FLOW_MAX_PULSES; i++) {
         pulses[i].active = false;
     }
 }
 
-// --- FLOW 流光效果 ---
-// 多脉冲拖尾单向流动: 每个音符触发一个光斑，从索引0向末端流动
-// 流动方向头部最亮，向尾部线性递减
+// --- FLOW 流光效果 (修复槽位复用) ---
 void musicFlow() {
     uint32_t elapsed = millis() - startTime;
     float elapsedSec = elapsed / 1000.0f;
 
-    // 1. 触发新脉冲: 遍历音符表中所有到时间的音符
-    while (nextNote < MUSIC_NOTE_COUNT && pulseCount < FLOW_MAX_PULSES) {
+    // 1. 触发新脉冲：遍历音符表中所有到时间的音符，使用空槽复用
+    while (nextNote < MUSIC_NOTE_COUNT) {
         float t = pgmReadFloat(&musicFlowTime[nextNote]);
         if (elapsedSec >= t) {
-            // 触发新脉冲
-            pulses[pulseCount].startSec = t;
+            // 寻找空闲脉冲槽
+            int slot = -1;
+            for (int i = 0; i < FLOW_MAX_PULSES; i++) {
+                if (!pulses[i].active) {
+                    slot = i;
+                    break;
+                }
+            }
+            // 无空槽，停止注册，等下一帧有脉冲结束
+            if (slot == -1) break;
+
+            pulses[slot].startSec = t;
             // 频率 → 色相
             float freq = pgmReadFloat(&musicFlowFreq[nextNote]);
             uint8_t hue = (uint8_t)constrain(
-                map((long)(freq * 10), 670, 14000, 0, 255),
-                0, 255
+                    map((long)(freq * 10), 670, 14000, 0, 255),
+                    0, 255
             );
-            pulses[pulseCount].hue   = hue;
-            pulses[pulseCount].active = true;
-            pulseCount++;
+            pulses[slot].hue   = hue;
+            pulses[slot].active = true;
             nextNote++;
         } else {
             break;
@@ -230,7 +239,7 @@ void musicFlow() {
     fill_solid(leds, LED_COUNT, CRGB::Black);
 
     // 3. 绘制每个活跃脉冲
-    for (int p = 0; p < pulseCount; p++) {
+    for (int p = 0; p < FLOW_MAX_PULSES; p++) {
         if (!pulses[p].active) continue;
 
         // 脉冲已流动的秒数
@@ -289,21 +298,20 @@ void processMusicCommand(uint8_t mode, uint8_t enable) {
 
     // 设置使能状态
     if (enable == 0) {
-    startTime    = millis();
-    musicEnabled = true;
-    musicIndex   = 0;
-    if (musicMode == MUSIC_FLOW) {
-        flowInit();
-    } else if (musicMode == MUSIC_BREATH) {
-        breathInit();
-    }
-    Serial.print(F("Music enabled, startTime = "));
-    Serial.println(startTime);
+        startTime    = millis();
+        musicEnabled = true;
+        if (musicMode == MUSIC_FLOW) {
+            flowInit();
+        } else if (musicMode == MUSIC_BREATH) {
+            breathInit();
+        }
+        Serial.print(F("Music enabled, startTime = "));
+        Serial.println(startTime);
     } else {
-    musicEnabled = false;
-    FastLED.clear();
-    FastLED.show();
-    Serial.println(F("Music disabled"));
+        musicEnabled = false;
+        FastLED.clear();
+        FastLED.show();
+        Serial.println(F("Music disabled"));
     }
 }
 
