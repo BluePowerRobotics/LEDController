@@ -12,6 +12,7 @@
 
 #include <FastLED.h>
 #include <Wire.h>
+#include "notes_data.h"
 
 // ============================================================================
 // 硬件配置
@@ -21,6 +22,13 @@
 #define LED_COUNT     100
 #define LED_TYPE      WS2812B
 #define COLOR_ORDER   GBR
+
+// ============================================================================
+// FLOW 模式参数
+// ============================================================================
+#define FLOW_SPEED      50.0f   // 脉冲流动速度 (LEDs/秒)
+#define FLOW_TAIL       25      // 拖尾长度 (LED 个数)
+#define FLOW_MAX_PULSES 50      // 最大同时脉冲数
 
 // ============================================================================
 // 默认参数
@@ -45,6 +53,7 @@ enum MusicMode {
 MusicMode  musicMode     = MUSIC_BREATH;
 bool       musicEnabled  = false;
 uint32_t   startTime     = 0;      // 启用时刻 (millis)
+int        musicIndex    = 0;      // 当前音符索引 (0..MUSIC_NOTE_COUNT-1)
 
 // --- 全局亮度 ---
 uint8_t globalBrightness = DEFAULT_BRIGHTNESS;
@@ -65,26 +74,142 @@ void receiveEvent(int howMany) {
 }
 
 // ============================================================================
-// 音乐效果函数 (占位)
+// 从 PROGMEM 读取浮点数
+// ============================================================================
+float pgmReadFloat(const float* ptr) {
+    float val;
+    memcpy_P(&val, ptr, sizeof(float));
+    return val;
+}
+
+// ============================================================================
+// FLOW 脉冲状态
+// ============================================================================
+struct FlowPulse {
+    float   startSec;   // 脉冲出发时刻 (相对于 startTime, 秒)
+    uint8_t hue;        // 色相
+    bool    active;
+};
+
+FlowPulse pulses[FLOW_MAX_PULSES];
+int       pulseCount = 0;  // 已触发的脉冲数
+int       nextNote   = 0;  // 下一个待触发的音符索引
+
+// ============================================================================
+// 音乐效果函数
 // ============================================================================
 
 // --- BREATH 呼吸效果 ---
+// 仅使用 musicBreathTime[] (时间点)
+// 整体灯带呼吸，颜色随当前时间推进
 void musicBreath() {
-    // TODO: 实现呼吸效果逻辑
-    // 使用 startTime 和 millis() 计算相位
     uint32_t elapsed = millis() - startTime;
-    uint8_t brightness = beatsin8(30, 10, 255, 0, elapsed >> 16);  // 简单示例
-    fill_solid(leds, LED_COUNT, CRGB::Red);
+    float elapsedSec = elapsed / 1000.0f;
+
+    // 推进索引: 找到当前时间对应的音符
+    while (musicIndex < MUSIC_NOTE_COUNT - 1) {
+        float nextTime = pgmReadFloat(&musicBreathTime[musicIndex + 1]);
+        if (elapsedSec >= nextTime) {
+            musicIndex++;
+        } else {
+            break;
+        }
+    }
+
+    // 如果已经播完最后一音，停在最后
+    if (musicIndex >= MUSIC_NOTE_COUNT) {
+        musicIndex = MUSIC_NOTE_COUNT - 1;
+    }
+
+    // 呼吸亮度: 用正弦波
+    float phase = elapsedSec * 1.5f;  // 呼吸频率
+    uint8_t brightness = (uint8_t)(127.5f * (1.0f + sin(phase))) + 10;
+
+    // 根据当前音符索引映射颜色 (简单色相轮)
+    uint8_t hue = (musicIndex * 17) % 255;
+    CRGB color = CHSV(hue, 200, 255);
+    fill_solid(leds, LED_COUNT, color);
     nscale8(leds, LED_COUNT, brightness);
 }
 
+// --- FLOW 初始化 (enable=0 时调用) ---
+void flowInit() {
+    pulseCount = 0;
+    nextNote   = 0;
+    for (int i = 0; i < FLOW_MAX_PULSES; i++) {
+        pulses[i].active = false;
+    }
+}
+
 // --- FLOW 流光效果 ---
+// 多脉冲拖尾单向流动: 每个音符触发一个光斑，从索引0向末端流动
+// 流动方向头部最亮，向尾部线性递减
 void musicFlow() {
-    // TODO: 实现流光效果逻辑
-    // 使用 startTime 和 millis() 计算相位
     uint32_t elapsed = millis() - startTime;
-    for (int i = 0; i < LED_COUNT; i++) {
-        leds[i] = CHSV((elapsed / 10 + i * 3) % 255, 255, 255);
+    float elapsedSec = elapsed / 1000.0f;
+
+    // 1. 触发新脉冲: 遍历音符表中所有到时间的音符
+    while (nextNote < MUSIC_NOTE_COUNT && pulseCount < FLOW_MAX_PULSES) {
+        float t = pgmReadFloat(&musicFlowTime[nextNote]);
+        if (elapsedSec >= t) {
+            // 触发新脉冲
+            pulses[pulseCount].startSec = t;
+            // 频率 → 色相
+            float freq = pgmReadFloat(&musicFlowFreq[nextNote]);
+            uint8_t hue = (uint8_t)constrain(
+                map((long)(freq * 10), 670, 14000, 0, 255),
+                0, 255
+            );
+            pulses[pulseCount].hue   = hue;
+            pulses[pulseCount].active = true;
+            pulseCount++;
+            nextNote++;
+        } else {
+            break;
+        }
+    }
+
+    // 2. 清空灯带
+    fill_solid(leds, LED_COUNT, CRGB::Black);
+
+    // 3. 绘制每个活跃脉冲
+    for (int p = 0; p < pulseCount; p++) {
+        if (!pulses[p].active) continue;
+
+        // 脉冲已流动的秒数
+        float dt = elapsedSec - pulses[p].startSec;
+        if (dt < 0.0f) dt = 0.0f;
+
+        // 当前头部位置 (浮点 LED 索引)
+        float headPos = dt * FLOW_SPEED;  // 单位: LEDs
+
+        // 头部超出灯带范围 -> 标记失活
+        if (headPos >= LED_COUNT + FLOW_TAIL) {
+            pulses[p].active = false;
+            continue;
+        }
+
+        // 遍历拖尾范围
+        int tailStart = (int)(headPos - FLOW_TAIL);
+        if (tailStart < 0) tailStart = 0;
+        int tailEnd = (int)headPos;
+        if (tailEnd >= LED_COUNT) tailEnd = LED_COUNT - 1;
+
+        for (int i = tailStart; i <= tailEnd; i++) {
+            // 该 LED 与头部的距离
+            float dist = headPos - (float)i;
+            if (dist < 0.0f) dist = 0.0f;
+            if (dist > (float)FLOW_TAIL) dist = (float)FLOW_TAIL;
+
+            // 亮度线性递减: 头部 255 → 尾部 0
+            uint8_t bri = (uint8_t)(255.0f * (1.0f - dist / (float)FLOW_TAIL));
+
+            if (bri > 0) {
+                CRGB c = CHSV(pulses[p].hue, 255, 255);
+                c.nscale8(bri);
+                leds[i] += c;
+            }
+        }
     }
 }
 
@@ -107,15 +232,19 @@ void processMusicCommand(uint8_t mode, uint8_t enable) {
 
     // 设置使能状态
     if (enable == 0) {
-        startTime    = millis();
-        musicEnabled = true;
-        Serial.print(F("Music enabled, startTime = "));
-        Serial.println(startTime);
+    startTime    = millis();
+    musicEnabled = true;
+    musicIndex   = 0;
+    if (musicMode == MUSIC_FLOW) {
+        flowInit();
+    }
+    Serial.print(F("Music enabled, startTime = "));
+    Serial.println(startTime);
     } else {
-        musicEnabled = false;
-        FastLED.clear();
-        FastLED.show();
-        Serial.println(F("Music disabled"));
+    musicEnabled = false;
+    FastLED.clear();
+    FastLED.show();
+    Serial.println(F("Music disabled"));
     }
 }
 
