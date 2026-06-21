@@ -361,7 +361,17 @@ void loop() {
             Serial.println(cmd, HEX);
         }
     }
-
+    if (Serial.available() > 0) {  // 1. 检测串口是否有数据
+        char c = Serial.read();      // 2. 读取一个字符
+        // 4. 判断输入的字符
+        if (c == '0') {
+        processMusicCommand(0, 0);
+    } else if (c == '1') {
+        processMusicCommand(0, 1);
+    }else if (c == '2') {
+        processMusicCommand(1, 0);
+    }
+}
     // --- 运行动画 ---
     if (musicEnabled) {
         switch (musicMode) {
