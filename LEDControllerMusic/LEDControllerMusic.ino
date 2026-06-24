@@ -17,17 +17,17 @@
 // ============================================================================
 // 硬件配置
 // ============================================================================
-#define LED_PIN       6
+#define LED_PIN       3
 #define I2C_ADDRESS   0x08
 #define LED_COUNT     100
 #define LED_TYPE      WS2812B
-#define COLOR_ORDER   GBR
+#define COLOR_ORDER   GRB
 
 // ============================================================================
 // BREATH 模式参数
 // ============================================================================
 #define BREATH_COLOR         CRGB(0, 180, 255)  // 预设颜色 (冰蓝)
-#define BREATH_DECAY_SEC     0.8f               // 衰减时长 (秒)
+#define BREATH_DECAY_SEC     0.6f               // 衰减时长 (秒)
 #define BREATH_MAINTENANCE   40                 // 维持亮度 (0-255)
 #define BREATH_FULL          255                // 触发瞬间亮度
 #define BREATH_MAX_TRIGGERS  64                 // 最大同时活跃触发数
@@ -35,8 +35,8 @@
 // ============================================================================
 // FLOW 模式参数
 // ============================================================================
-#define FLOW_SPEED      50.0f   // 脉冲流动速度 (LEDs/秒)
-#define FLOW_TAIL       25      // 拖尾长度 (LED 个数)
+#define FLOW_SPEED      60.0f   // 脉冲流动速度 (LEDs/秒)
+#define FLOW_TAIL       8      // 拖尾长度 (LED 个数)
 #define FLOW_MAX_PULSES 50      // 最大同时脉冲数
 
 // ============================================================================
@@ -227,6 +227,11 @@ void musicFlow() {
                     map((long)(freq * 10), 670, 14000, 0, 255),
                     0, 255
             );
+            // CHSV hsv;
+            // hsv = rgb2hsv_approximate(CRGB::Blue);
+            // uint8_t hue = hsv.h;
+            // hue = 140;
+            hue = hue * 0.333 - 43 + 170;
             pulses[slot].hue   = hue;
             pulses[slot].active = true;
             nextNote++;
